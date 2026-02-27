@@ -2,10 +2,24 @@ import time
 import os
 import threading
 import subprocess
+import logging
+import sys
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
-
 from srs.settings import cfg
+
+
+# ==============================
+# LOGGING SETUP
+# ==============================
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
+
+logger = logging.getLogger(__name__)
+
 
 processing_files = set()
 lock = threading.Lock()
@@ -24,7 +38,7 @@ def rsync_upload(local_path):
         f"mkdir -p {cfg.REMOTE_BASE}/{remote_dir}"
     ]
 
-    print("🚀", " ".join(mkdir_cmd))
+    logger.info("EXEC: %s", " ".join(mkdir_cmd))
 
     subprocess.run(
         mkdir_cmd,
@@ -38,13 +52,14 @@ def rsync_upload(local_path):
         f"{cfg.RSYNC_SSH}:{cfg.REMOTE_BASE}/{remote_dir}/"
     ]
 
-    print("🚀", " ".join(cmd))
+    logger.info("EXEC: %s", " ".join(cmd))
 
     subprocess.run(
         cmd,
         check=True,
         cwd=cfg.WATCH_DIR
     )
+
 
 # =====================================
 # WATCHDOG HANDLER
@@ -69,7 +84,7 @@ class VideoFileHandler(FileSystemEventHandler):
                 return
             processing_files.add(event.src_path)
 
-        print(f"[DETECT] {event.src_path}")
+        logger.info("[DETECT] %s", event.src_path)
 
         threading.Thread(
             target=self.wait_until_file_ready,
@@ -86,6 +101,7 @@ class VideoFileHandler(FileSystemEventHandler):
 
         while True:
             if not os.path.exists(path):
+                logger.warning("File disappeared: %s", path)
                 break
 
             size = os.path.getsize(path)
@@ -96,7 +112,7 @@ class VideoFileHandler(FileSystemEventHandler):
                 stable_count = 0
 
             if stable_count >= cfg.STABLE_SECONDS:
-                print(f"[READY] {path}")
+                logger.info("[READY] %s", path)
                 self.upload_with_retry(path)
                 break
 
@@ -113,30 +129,38 @@ class VideoFileHandler(FileSystemEventHandler):
         for attempt in range(1, cfg.RSYNC_RETRY + 1):
             try:
                 rsync_upload(path)
-                print(f"✅ Upload OK: {path}")
+                logger.info("Upload OK: %s", path)
                 return
             except Exception as e:
-                print(f"❌ Upload FAIL ({attempt}/{cfg.RSYNC_RETRY}): {path}")
-                print(e)
+                logger.error(
+                    "Upload FAIL (%d/%d): %s",
+                    attempt,
+                    cfg.RSYNC_RETRY,
+                    path
+                )
+                logger.error("Error: %s", str(e))
                 time.sleep(3)
 
-        print(f"🔥 FINAL FAIL: {path}")
+        logger.critical("FINAL FAIL: %s", path)
 
 
 # =====================================
 # MAIN
 # =====================================
 if __name__ == "__main__":
+
+    logger.info("🚀 srs_forward_video started")
+    logger.info("Watching folder: %s", cfg.WATCH_DIR)
+
     observer = Observer()
     observer.schedule(VideoFileHandler(), cfg.WATCH_DIR, recursive=True)
     observer.start()
-
-    print("👀 Watching folder:", cfg.WATCH_DIR)
 
     try:
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
+        logger.info("Stopping observer...")
         observer.stop()
 
     observer.join()

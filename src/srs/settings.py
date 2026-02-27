@@ -1,5 +1,5 @@
 class Settings:
-    ZONE_FILE: str = 'cam_zone.json'
+    ZONE_FILE: str = '/home/ai/projects/srs/src/srs/cam_zone.json'
     CAMERAS = {
         "cam1": "rtsp://admin:Rsc@13579@192.168.1.100:554/Streaming/Channels/101",
         # "cam2": "rtsp://admin:Rsc@13579@192.168.1.100:554/Streaming/Channels/101",

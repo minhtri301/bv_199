@@ -6,27 +6,49 @@ import threading
 import numpy as np
 import queue
 import json
+import logging
+import sys
 from datetime import datetime
 from srs.settings import cfg
 
+
+# ==============================
+# LOGGING SETUP
+# ==============================
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
+
+logger = logging.getLogger(__name__)
+
+
+# ==============================
+# INIT
+# ==============================
 os.makedirs(cfg.RECORD_ROOT, exist_ok=True)
+logger.info("🚀 srs_forward_video started")
+
 
 # ==============================
 # LOAD ZONES
 # ==============================
 def load_zones():
     if not os.path.exists(cfg.ZONE_FILE):
-        print("⚠ No cam_zone.json found")
+        logger.warning("No cam_zone.json found")
         return {}
 
     with open(cfg.ZONE_FILE, "r") as f:
         raw = json.load(f)
 
     zones = {cam: np.array(pts, dtype=np.int32) for cam, pts in raw.items()}
-    print("✅ Zones loaded:", list(zones.keys()))
+    logger.info(f"Zones loaded: {list(zones.keys())}")
     return zones
 
+
 CAMERA_ZONES = load_zones()
+
 
 # ==============================
 # HELPERS
@@ -34,10 +56,12 @@ CAMERA_ZONES = load_zones()
 def scale_polygon(poly, sx, sy):
     return np.array([[int(x * sx), int(y * sy)] for (x, y) in poly], dtype=np.int32)
 
+
 def bbox_center_inside_polygon(x, y, w, h, poly):
     cx = x + w // 2
     cy = y + h // 2
     return cv2.pointPolygonTest(poly, (cx, cy), False) >= 0
+
 
 def ffmpeg_cmd(rtsp_url, output_file):
     return [
@@ -52,10 +76,14 @@ def ffmpeg_cmd(rtsp_url, output_file):
         output_file,
     ]
 
+
 # ==============================
 # CAMERA THREAD
 # ==============================
 def process_camera(cam_name, rtsp_url, debug_queue=None):
+
+    logger.info(f"[{cam_name}] Starting camera thread")
+
     cap = cv2.VideoCapture(rtsp_url)
     bg = cv2.createBackgroundSubtractorMOG2(history=1000, varThreshold=50)
 
@@ -66,17 +94,18 @@ def process_camera(cam_name, rtsp_url, debug_queue=None):
     zone_orig = CAMERA_ZONES.get(cam_name)
 
     if zone_orig is None:
-        print(f"⚠ No zone defined for {cam_name} → recording disabled")
+        logger.warning(f"[{cam_name}] No zone defined → recording disabled")
 
     while True:
         ret, frame = cap.read()
+
         if not ret:
+            logger.warning(f"[{cam_name}] Cannot read frame, retrying...")
             time.sleep(1)
             continue
 
         h, w = frame.shape[:2]
 
-        # Nếu không có zone → bỏ qua luôn
         if zone_orig is None:
             continue
 
@@ -125,18 +154,17 @@ def process_camera(cam_name, rtsp_url, debug_queue=None):
                 )
 
                 recording = True
-                print(f"[REC] ▶ Start {out_path}")
+                logger.info(f"[{cam_name}] ▶ Start recording: {out_path}")
 
         elif recording and (now - last_motion > cfg.MOTION_TIMEOUT):
             ffmpeg_proc.terminate()
             recording = False
-            print("[REC] ⏹ Stop")
+            logger.info(f"[{cam_name}] ⏹ Stop recording")
 
         # ================= DEBUG =================
         if debug_queue is not None:
             preview = frame.copy()
 
-            # Polygon đổi màu khi recording
             poly_color = (0, 0, 255) if recording else (0, 255, 255)
 
             overlay = preview.copy()
@@ -144,7 +172,6 @@ def process_camera(cam_name, rtsp_url, debug_queue=None):
             preview = cv2.addWeighted(overlay, 0.2, preview, 0.8, 0)
             cv2.polylines(preview, [zone_orig], True, poly_color, 3)
 
-            # scale box về frame gốc
             sx_up = w / float(cfg.MOTION_DETECT_SIZE)
             sy_up = h / float(cfg.MOTION_DETECT_SIZE)
 
@@ -172,30 +199,6 @@ def process_camera(cam_name, rtsp_url, debug_queue=None):
 
 
 # ==============================
-# UI LOOP
-# ==============================
-def ui_loop(debug_queue):
-    for cam in cfg.CAMERAS.keys():
-        cv2.namedWindow(cam, cv2.WINDOW_NORMAL)
-        cv2.resizeWindow(cam, cfg.WINDOW_W, cfg.WINDOW_H)
-
-    while True:
-        try:
-            cam, frame = debug_queue.get(timeout=1)
-        except queue.Empty:
-            if cv2.waitKey(1) == 27:
-                break
-            continue
-
-        cv2.imshow(cam, frame)
-
-        if cv2.waitKey(1) == 27:
-            break
-
-    cv2.destroyAllWindows()
-
-
-# ==============================
 # MAIN
 # ==============================
 if __name__ == "__main__":
@@ -211,7 +214,10 @@ if __name__ == "__main__":
         t.start()
 
     if cfg.SHOW_DEBUG:
-        ui_loop(dbg_q)
+        logger.info("Debug UI enabled")
+        while True:
+            time.sleep(1)
     else:
+        logger.info("Running in headless mode")
         while True:
             time.sleep(1)
